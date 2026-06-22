@@ -26,6 +26,11 @@ class CorrectionRequest(BaseModel):
     target_variables: list = []
 
 
+class ReviewRequest(BaseModel):
+    """Request to run AI review on a completed analysis."""
+    review_type: str = "full"  # full, mechanical_only, methodology_only
+
+
 @router.post("/submissions/{submission_id}/run")
 async def trigger_analysis(
     submission_id: UUID,
@@ -173,6 +178,92 @@ async def apply_correction(
     }
 
 
+@router.post("/submissions/{submission_id}/review")
+async def run_ai_review(
+    submission_id: UUID,
+    request: ReviewRequest = ReviewRequest(),
+    background_tasks: BackgroundTasks = None,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Run the AI Professor Review Agent on a completed analysis.
+
+    This provides an automated quality check that can:
+    - Replace manual professor review (AI-only mode)
+    - Pre-screen before professor review (hybrid mode, reduces review time ~80%)
+    """
+    result = await db.execute(select(Submission).where(Submission.id == submission_id))
+    submission = result.scalar_one_or_none()
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    # Get the latest completed job
+    job_result = await db.execute(
+        select(AnalysisJob)
+        .where(AnalysisJob.submission_id == submission_id)
+        .where(AnalysisJob.status == JobStatus.COMPLETED)
+        .order_by(AnalysisJob.completed_at.desc())
+    )
+    completed_job = job_result.scalar_one_or_none()
+    if not completed_job or not completed_job.result_data:
+        raise HTTPException(status_code=404, detail="No completed analysis found to review")
+
+    # Create a review job
+    review_job = AnalysisJob(
+        submission_id=submission_id,
+        status=JobStatus.QUEUED,
+        current_step="AI review queued",
+    )
+    db.add(review_job)
+    await db.commit()
+    await db.refresh(review_job)
+
+    if settings.ENV == "production":
+        from src.medstats.services.worker import run_review_pipeline
+        run_review_pipeline.delay(str(review_job.id), str(completed_job.id), request.review_type)
+    else:
+        background_tasks.add_task(
+            _run_review_inline, str(review_job.id), str(completed_job.id), request.review_type
+        )
+
+    return {
+        "job_id": str(review_job.id),
+        "status": "processing",
+        "message": "AI Professor Review initiated",
+    }
+
+
+@router.get("/submissions/{submission_id}/review")
+async def get_review_results(
+    submission_id: UUID,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get the latest AI review results for a submission."""
+    job_result = await db.execute(
+        select(AnalysisJob)
+        .where(AnalysisJob.submission_id == submission_id)
+        .where(AnalysisJob.status == JobStatus.COMPLETED)
+        .order_by(AnalysisJob.completed_at.desc())
+    )
+    job = job_result.scalar_one_or_none()
+    if not job or not job.result_data:
+        raise HTTPException(status_code=404, detail="No review results found")
+
+    import json
+    result_data = json.loads(job.result_data) if isinstance(job.result_data, str) else job.result_data
+
+    review_summary = result_data.get("review_summary")
+    if not review_summary:
+        raise HTTPException(status_code=404, detail="No AI review in latest completed job")
+
+    return {
+        "submission_id": str(submission_id),
+        "review_summary": review_summary,
+        "review_verdict": result_data.get("review_verdict", "pending"),
+    }
+
+
 @router.get("/submissions/{submission_id}/export/{format}")
 async def export_report(
     submission_id: UUID,
@@ -268,6 +359,12 @@ async def _run_pipeline_inline(job_id: str):
                 job.current_step = f"Agent {updated_state.current_agent_index + 1}/3"
                 await db.commit()
 
+            # Run AI Review as post-pipeline step
+            from src.medstats.agents.review_agent import ReviewAgent
+            if updated_state.status == "COMPLETED":
+                reviewer = ReviewAgent(services=None)
+                updated_state = await reviewer.run(updated_state)
+
             if updated_state.status == "COMPLETED":
                 job.status = JobStatus.COMPLETED
                 job.progress = 100
@@ -278,6 +375,8 @@ async def _run_pipeline_inline(job_id: str):
                     "title": updated_state.agent_outputs.get("title", ""),
                     "methodology_note": updated_state.agent_outputs.get("methodology_note", ""),
                     "summary": updated_state.agent_outputs.get("summary", ""),
+                    "review_summary": updated_state.agent_outputs.get("review_summary"),
+                    "review_verdict": updated_state.agent_outputs.get("review_verdict"),
                 })
             else:
                 job.status = JobStatus.FAILED
@@ -288,6 +387,70 @@ async def _run_pipeline_inline(job_id: str):
                 SubmissionStatus.REPORT_READY if job.status == JobStatus.COMPLETED
                 else SubmissionStatus.FAILED
             )
+            await db.commit()
+
+        except Exception as e:
+            job.status = JobStatus.FAILED
+            job.error_log = str(e)
+            job.completed_at = datetime.utcnow()
+            await db.commit()
+
+
+async def _run_review_inline(job_id: str, source_job_id: str, review_type: str):
+    """Run the AI Review Agent inline against a completed analysis."""
+    from src.shared.db.session import async_session_factory
+    from src.medstats.agents.review_agent import ReviewAgent
+    from src.agentic_core.agents.base_agent import MissionState
+    from datetime import datetime
+    import json
+
+    async with async_session_factory() as db:
+        result = await db.execute(select(AnalysisJob).where(AnalysisJob.id == job_id))
+        job = result.scalar_one_or_none()
+        if not job:
+            return
+
+        job.status = JobStatus.RUNNING
+        job.started_at = datetime.utcnow()
+        job.current_step = "AI Review in progress"
+        await db.commit()
+
+        try:
+            # Load source analysis results
+            source_result = await db.execute(
+                select(AnalysisJob).where(AnalysisJob.id == source_job_id)
+            )
+            source_job = source_result.scalar_one_or_none()
+            if not source_job or not source_job.result_data:
+                job.status = JobStatus.FAILED
+                job.error_log = "Source analysis job not found"
+                job.completed_at = datetime.utcnow()
+                await db.commit()
+                return
+
+            source_data = json.loads(source_job.result_data) if isinstance(source_job.result_data, str) else source_job.result_data
+
+            state = MissionState(
+                submission_id=str(job.submission_id),
+                job_id=job_id,
+            )
+            state.agent_outputs.update(source_data)
+
+            reviewer = ReviewAgent(services=None)
+            state = await reviewer.run(state)
+
+            if state.status != "FAILED":
+                job.status = JobStatus.COMPLETED
+                job.progress = 100
+                # Merge review results with source data
+                source_data["review_summary"] = state.agent_outputs.get("review_summary")
+                source_data["review_verdict"] = state.agent_outputs.get("review_verdict")
+                job.result_data = json.dumps(source_data)
+            else:
+                job.status = JobStatus.FAILED
+                job.error_log = state.error_message
+
+            job.completed_at = datetime.utcnow()
             await db.commit()
 
         except Exception as e:
