@@ -135,6 +135,17 @@ class ReviewAgent(BaseAgent):
         tier3_items = await self._tier3_interpretation(data, df)
         items.extend(tier3_items)
 
+        # Deduplicate: same check_id + variable should appear only once
+        seen = set()
+        deduped = []
+        for item in items:
+            key = (item.check_id, item.variable)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        items = deduped
+
         # Build summary
         summary = ReviewSummary(
             total_checks=len(items),
@@ -413,19 +424,22 @@ class ReviewAgent(BaseAgent):
         """Rule-based statistical methodology checks."""
         items = []
 
-        # 2.1 Test-data type appropriateness
+        # 2.1 Test-data type appropriateness (basic type match)
         items.extend(self._check_test_appropriateness(data))
 
-        # 2.2 Sample size adequacy per test
+        # 2.2 Deep test selection validation (normality, groups, study design)
+        items.extend(self._check_test_selection_logic(data, df))
+
+        # 2.3 Sample size adequacy per test
         items.extend(self._check_sample_adequacy(data, df))
 
-        # 2.3 Normality assumption validation
+        # 2.4 Normality assumption validation
         items.extend(self._check_normality_assumptions(data, df))
 
-        # 2.4 Multiple testing correction
+        # 2.5 Multiple testing correction
         items.extend(self._check_multiple_testing(data))
 
-        # 2.5 Chi-square expected cell counts
+        # 2.6 Chi-square expected cell counts
         items.extend(self._check_chi_square_assumptions(data, df))
 
         return items
@@ -479,6 +493,233 @@ class ReviewAgent(BaseAgent):
                     message=f"{var_name}: {test_type} appropriate for {dtype} data",
                     variable=var_name,
                 ))
+        return items
+
+    def _check_test_selection_logic(self, data: dict, df: Optional[pd.DataFrame]) -> List[ReviewItem]:
+        """
+        Deep validation of statistical test selection against the actual data characteristics.
+        Checks normality-based decisions, group counts, study design consistency, and
+        whether parametric vs non-parametric was correctly chosen.
+        """
+        items = []
+        variables = {v["name"]: v for v in data.get("variables", [])}
+        test_results = data.get("test_results", [])
+        study_design = data.get("study_design", "")
+        sample_size = data.get("sample_size", 0)
+
+        # Collect normality test results for cross-referencing
+        normality_results: Dict[str, bool] = {}
+        for tr in test_results:
+            inner = self._get_inner(tr)
+            if inner.get("test_type") == "shapiro_wilk":
+                var_name = tr.get("variable_name", "") or inner.get("variable_name", "")
+                p_val = inner.get("p_value")
+                if var_name and p_val is not None and isinstance(p_val, (int, float)):
+                    normality_results[var_name] = p_val > 0.05  # True = normal
+
+        # Collect unique categories per variable for group-count validation
+        var_categories: Dict[str, int] = {}
+        if df is not None:
+            for var_name, var_info in variables.items():
+                if var_info.get("dtype") == "categorical" and var_name in df.columns:
+                    var_categories[var_name] = df[var_name].dropna().nunique()
+
+        for tr in test_results:
+            inner = self._get_inner(tr)
+            test_type = inner.get("test_type", "") or tr.get("test_type", "")
+            var_name = tr.get("variable_name", "") or inner.get("variable_name", "")
+            if not test_type or not var_name:
+                continue
+
+            var_info = variables.get(var_name)
+            if not var_info:
+                continue
+
+            dtype = var_info.get("dtype", "")
+
+            # ── Check 1: Parametric test on non-normal data ──
+            if test_type in ("unpaired_t_test", "paired_t_test", "one_way_anova"):
+                if var_name in normality_results and not normality_results[var_name]:
+                    non_param_alt = {
+                        "unpaired_t_test": "Mann-Whitney U test",
+                        "paired_t_test": "Wilcoxon signed-rank test",
+                        "one_way_anova": "Kruskal-Wallis test",
+                    }
+                    items.append(ReviewItem(
+                        check_id="parametric_on_nonnormal",
+                        tier=2,
+                        severity=Severity.ERROR,
+                        category="Test Selection",
+                        message=(
+                            f"{var_name}: parametric test '{test_type}' used but "
+                            f"Shapiro-Wilk indicates non-normal distribution"
+                        ),
+                        variable=var_name,
+                        suggestion=f"Use {non_param_alt.get(test_type, 'non-parametric alternative')} instead",
+                        auto_fixable=True,
+                    ))
+                elif var_name in normality_results and normality_results[var_name]:
+                    items.append(ReviewItem(
+                        check_id="parametric_normal_ok",
+                        tier=2,
+                        severity=Severity.OK,
+                        category="Test Selection",
+                        message=f"{var_name}: parametric '{test_type}' justified by normal distribution",
+                        variable=var_name,
+                    ))
+
+            # ── Check 2: Non-parametric test on normal data (missed power) ──
+            if test_type in ("mann_whitney_u", "kruskal_wallis"):
+                if var_name in normality_results and normality_results[var_name] and sample_size >= 30:
+                    param_alt = {
+                        "mann_whitney_u": "unpaired t-test",
+                        "kruskal_wallis": "one-way ANOVA",
+                    }
+                    items.append(ReviewItem(
+                        check_id="nonparam_on_normal",
+                        tier=2,
+                        severity=Severity.INFO,
+                        category="Test Selection",
+                        message=(
+                            f"{var_name}: non-parametric '{test_type}' used but data appears normal "
+                            f"(N={sample_size}). Parametric test would have more statistical power."
+                        ),
+                        variable=var_name,
+                        suggestion=f"Consider using {param_alt.get(test_type)} for higher power",
+                    ))
+
+            # ── Check 3: t-test used when >2 groups exist ──
+            if test_type in ("unpaired_t_test", "paired_t_test") and df is not None:
+                # Find the grouping variable (any categorical var with ≥3 categories)
+                cat_vars = [
+                    v for v in variables.values()
+                    if v.get("dtype") == "categorical" and v["name"] != var_name
+                ]
+                for cv in cat_vars:
+                    n_groups = var_categories.get(cv["name"], 0)
+                    if n_groups > 2:
+                        items.append(ReviewItem(
+                            check_id="ttest_multigroup",
+                            tier=2,
+                            severity=Severity.WARNING,
+                            category="Test Selection",
+                            message=(
+                                f"{var_name}: t-test used but grouping variable "
+                                f"'{cv['name']}' has {n_groups} categories (>2). "
+                                f"T-test only valid for exactly 2-group comparison."
+                            ),
+                            variable=var_name,
+                            suggestion="Use one-way ANOVA (parametric) or Kruskal-Wallis (non-parametric) for ≥3 groups",
+                            auto_fixable=True,
+                        ))
+                        break  # Only flag once per variable
+
+            # ── Check 4: ANOVA used with only 2 groups ──
+            if test_type == "one_way_anova" and df is not None:
+                cat_vars = [
+                    v for v in variables.values()
+                    if v.get("dtype") == "categorical" and v["name"] != var_name
+                ]
+                for cv in cat_vars:
+                    n_groups = var_categories.get(cv["name"], 0)
+                    if n_groups == 2:
+                        items.append(ReviewItem(
+                            check_id="anova_two_groups",
+                            tier=2,
+                            severity=Severity.INFO,
+                            category="Test Selection",
+                            message=(
+                                f"{var_name}: ANOVA used but '{cv['name']}' has only 2 groups. "
+                                f"While ANOVA works, t-test is more standard for 2-group comparison."
+                            ),
+                            variable=var_name,
+                            suggestion="Consider using unpaired t-test for 2-group comparison (equivalent result, conventional choice)",
+                        ))
+                        break
+
+            # ── Check 5: Chi-square on very small expected counts → Fisher's exact ──
+            if test_type == "chi_square" and df is not None and dtype == "categorical":
+                if var_name in df.columns:
+                    counts = df[var_name].dropna().value_counts()
+                    n_categories = len(counts)
+                    min_expected = sample_size / n_categories if n_categories > 0 else 0
+                    if min_expected < 5 or (counts < 5).any():
+                        items.append(ReviewItem(
+                            check_id="chi_sq_should_fisher",
+                            tier=2,
+                            severity=Severity.WARNING,
+                            category="Test Selection",
+                            message=(
+                                f"{var_name}: chi-square test used but expected cell frequencies <5. "
+                                f"Chi-square approximation unreliable with sparse cells."
+                            ),
+                            variable=var_name,
+                            suggestion="Use Fisher's exact test when any expected cell count < 5",
+                            auto_fixable=True,
+                        ))
+
+            # ── Check 6: Z-test proportion appropriateness ──
+            if test_type == "z_test_proportion":
+                if dtype != "categorical":
+                    items.append(ReviewItem(
+                        check_id="ztest_not_categorical",
+                        tier=2,
+                        severity=Severity.ERROR,
+                        category="Test Selection",
+                        message=f"{var_name}: Z-test for proportion used on non-categorical data",
+                        variable=var_name,
+                        suggestion="Z-test for proportions only applies to categorical/binary variables",
+                    ))
+                elif dtype == "categorical" and var_name in var_categories:
+                    n_cats = var_categories[var_name]
+                    if n_cats > 5:
+                        items.append(ReviewItem(
+                            check_id="ztest_too_many_cats",
+                            tier=2,
+                            severity=Severity.INFO,
+                            category="Test Selection",
+                            message=(
+                                f"{var_name}: Z-test proportion applied to variable with {n_cats} "
+                                f"categories. Z-test is most meaningful for binary/few-category variables."
+                            ),
+                            variable=var_name,
+                            suggestion="Consider chi-square goodness-of-fit test for multi-category variables",
+                        ))
+
+            # ── Check 7: Study design consistency ──
+            if study_design == "single_cohort":
+                two_group_tests = {"unpaired_t_test", "mann_whitney_u", "chi_square"}
+                if test_type in two_group_tests:
+                    items.append(ReviewItem(
+                        check_id="study_design_mismatch",
+                        tier=2,
+                        severity=Severity.WARNING,
+                        category="Test Selection",
+                        message=(
+                            f"{var_name}: comparison test '{test_type}' used in single-cohort study design. "
+                            f"This requires defining comparison groups."
+                        ),
+                        variable=var_name,
+                        suggestion="Verify that the study design should be 'two-group' or 'multi-group' instead of single cohort, or clarify which groups are being compared",
+                    ))
+
+            # ── Check 8: Small sample (N<30) with parametric test and no normality check ──
+            if test_type in ("unpaired_t_test", "paired_t_test") and sample_size < 30:
+                if var_name not in normality_results:
+                    items.append(ReviewItem(
+                        check_id="small_n_no_normality",
+                        tier=2,
+                        severity=Severity.WARNING,
+                        category="Test Selection",
+                        message=(
+                            f"{var_name}: parametric '{test_type}' with small sample (N={sample_size}) "
+                            f"but no normality test performed. Central Limit Theorem unreliable for N<30."
+                        ),
+                        variable=var_name,
+                        suggestion="Run Shapiro-Wilk test first; if non-normal, switch to Mann-Whitney U / Wilcoxon",
+                        auto_fixable=True,
+                    ))
+
         return items
 
     def _check_sample_adequacy(self, data: dict, df: Optional[pd.DataFrame]) -> List[ReviewItem]:

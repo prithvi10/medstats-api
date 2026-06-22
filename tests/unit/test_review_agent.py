@@ -318,6 +318,186 @@ class TestReviewAgentErrorDetection:
         print(f"\n✓ Bad report verdict: {summary['overall_verdict']} (est. {summary['estimated_review_minutes']} min)")
 
 
+class TestTestSelectionValidation:
+    """Tests for the deep test-selection logic (Tier 2.2)."""
+
+    @pytest.mark.asyncio
+    async def test_parametric_on_nonnormal_data(self):
+        """Should flag t-test when Shapiro-Wilk shows non-normality."""
+        state = MissionState(submission_id="test-sel", job_id="job-sel")
+        state.agent_outputs = {
+            "variables": [
+                {"name": "SCORE", "dtype": "numerical", "unique_values": 50, "missing_count": 0, "categories": []},
+            ],
+            "sample_size": 60,
+            "study_design": "two_group",
+            "title": "Test",
+            "test_results": [
+                {
+                    "variable_name": "SCORE",
+                    "test_result": {"test_type": "shapiro_wilk", "p_value": 0.001, "is_significant_05": True},
+                },
+                {
+                    "variable_name": "SCORE",
+                    "test_result": {"test_type": "unpaired_t_test", "p_value": 0.03, "is_significant_05": True},
+                },
+            ],
+            "frequency_tables": [],
+            "report_sections": [],
+            "charts": [],
+        }
+
+        agent = ReviewAgent(services=None)
+        result_state = await agent.run(state)
+        summary = result_state.agent_outputs["review_summary"]
+
+        errors = [i for i in summary["items"] if i["check_id"] == "parametric_on_nonnormal"]
+        assert len(errors) > 0
+        assert "Mann-Whitney" in errors[0]["suggestion"]
+        print(f"\n✓ Detected parametric on non-normal: {errors[0]['message']}")
+
+    @pytest.mark.asyncio
+    async def test_nonparametric_on_normal_data_flagged(self):
+        """Should suggest parametric test when data is normal (higher power)."""
+        state = MissionState(submission_id="test-sel2", job_id="job-sel2")
+        state.agent_outputs = {
+            "variables": [
+                {"name": "BP", "dtype": "numerical", "unique_values": 40, "missing_count": 0, "categories": []},
+            ],
+            "sample_size": 80,
+            "study_design": "two_group",
+            "title": "Test",
+            "test_results": [
+                {
+                    "variable_name": "BP",
+                    "test_result": {"test_type": "shapiro_wilk", "p_value": 0.45, "is_significant_05": False},
+                },
+                {
+                    "variable_name": "BP",
+                    "test_result": {"test_type": "mann_whitney_u", "p_value": 0.08, "is_significant_05": False},
+                },
+            ],
+            "frequency_tables": [],
+            "report_sections": [],
+            "charts": [],
+        }
+
+        agent = ReviewAgent(services=None)
+        result_state = await agent.run(state)
+        summary = result_state.agent_outputs["review_summary"]
+
+        info_items = [i for i in summary["items"] if i["check_id"] == "nonparam_on_normal"]
+        assert len(info_items) > 0
+        assert "power" in info_items[0]["message"].lower()
+        print(f"\n✓ Detected power loss: {info_items[0]['message']}")
+
+    @pytest.mark.asyncio
+    async def test_ztest_on_many_categories(self):
+        """Should flag Z-test proportion when variable has many categories."""
+        np.random.seed(42)
+        df = pd.DataFrame({
+            "DIAGNOSIS": np.random.choice(
+                [f"Type_{i}" for i in range(15)], 100
+            ),
+        })
+        state = MissionState(submission_id="test-sel3", job_id="job-sel3")
+        state.agent_outputs = {
+            "dataframe_json": df.to_json(),
+            "variables": [
+                {"name": "DIAGNOSIS", "dtype": "categorical", "unique_values": 15, "missing_count": 0, "categories": []},
+            ],
+            "sample_size": 100,
+            "study_design": "single_cohort",
+            "title": "Test",
+            "test_results": [
+                {
+                    "variable_name": "DIAGNOSIS",
+                    "test_type": "z_test_proportion",
+                    "p_value": 0.02,
+                    "is_significant_05": True,
+                },
+            ],
+            "frequency_tables": [],
+            "report_sections": [],
+            "charts": [],
+        }
+
+        agent = ReviewAgent(services=None)
+        result_state = await agent.run(state)
+        summary = result_state.agent_outputs["review_summary"]
+
+        ztest_issues = [i for i in summary["items"] if i["check_id"] == "ztest_too_many_cats"]
+        assert len(ztest_issues) > 0
+        assert "15 categories" in ztest_issues[0]["message"]
+        print(f"\n✓ Detected Z-test on many categories: {ztest_issues[0]['message']}")
+
+    @pytest.mark.asyncio
+    async def test_small_sample_no_normality(self):
+        """Should flag parametric test on small sample without normality check."""
+        state = MissionState(submission_id="test-sel4", job_id="job-sel4")
+        state.agent_outputs = {
+            "variables": [
+                {"name": "WEIGHT", "dtype": "numerical", "unique_values": 20, "missing_count": 0, "categories": []},
+            ],
+            "sample_size": 18,
+            "study_design": "two_group",
+            "title": "Test",
+            "test_results": [
+                {
+                    "variable_name": "WEIGHT",
+                    "test_result": {"test_type": "unpaired_t_test", "p_value": 0.04, "is_significant_05": True},
+                },
+            ],
+            "frequency_tables": [],
+            "report_sections": [],
+            "charts": [],
+        }
+
+        agent = ReviewAgent(services=None)
+        result_state = await agent.run(state)
+        summary = result_state.agent_outputs["review_summary"]
+
+        small_n = [i for i in summary["items"] if i["check_id"] == "small_n_no_normality"]
+        assert len(small_n) > 0
+        assert "N=18" in small_n[0]["message"]
+        print(f"\n✓ Detected small sample without normality: {small_n[0]['message']}")
+
+    @pytest.mark.asyncio
+    async def test_parametric_on_normal_data_passes(self):
+        """Parametric test on verified normal data should pass cleanly."""
+        state = MissionState(submission_id="test-sel5", job_id="job-sel5")
+        state.agent_outputs = {
+            "variables": [
+                {"name": "HEIGHT", "dtype": "numerical", "unique_values": 30, "missing_count": 0, "categories": []},
+            ],
+            "sample_size": 50,
+            "study_design": "two_group",
+            "title": "Test",
+            "test_results": [
+                {
+                    "variable_name": "HEIGHT",
+                    "test_result": {"test_type": "shapiro_wilk", "p_value": 0.35, "is_significant_05": False},
+                },
+                {
+                    "variable_name": "HEIGHT",
+                    "test_result": {"test_type": "unpaired_t_test", "p_value": 0.02, "is_significant_05": True},
+                },
+            ],
+            "frequency_tables": [],
+            "report_sections": [],
+            "charts": [],
+        }
+
+        agent = ReviewAgent(services=None)
+        result_state = await agent.run(state)
+        summary = result_state.agent_outputs["review_summary"]
+
+        ok_items = [i for i in summary["all_items"] if i["check_id"] == "parametric_normal_ok"]
+        assert len(ok_items) > 0
+        assert "justified" in ok_items[0]["message"]
+        print(f"\n✓ Correctly approved: {ok_items[0]['message']}")
+
+
 class TestReviewAgentWithRealData:
     @pytest.mark.asyncio
     async def test_review_after_full_pipeline(self):
