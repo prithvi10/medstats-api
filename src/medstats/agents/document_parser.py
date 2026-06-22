@@ -134,12 +134,39 @@ class DocumentParserAgent(BaseAgent):
         try:
             df = pd.read_excel(path, sheet_name=0, header=0)
             # Handle multi-row headers: if row 0 looks like a sub-header, skip it
-            if df.iloc[0].isna().sum() > len(df.columns) * 0.5:
+            if len(df) > 0 and df.iloc[0].isna().sum() > len(df.columns) * 0.5:
                 df = df.iloc[1:].reset_index(drop=True)
             return df
-        except Exception as e:
+        except (OverflowError, Exception) as e:
+            if "Overflow" in str(e) or "datetime" in str(e).lower():
+                try:
+                    from openpyxl import load_workbook
+                    wb = load_workbook(path, data_only=True)
+                    ws = wb.active
+                    data = list(ws.values)
+                    if len(data) < 2:
+                        return None
+                    headers = [str(h) if h else f"Col_{i}" for i, h in enumerate(data[0])]
+                    rows = [[str(cell) if cell is not None else None for cell in row] for row in data[1:]]
+                    df = pd.DataFrame(rows, columns=headers)
+                    df = self._coerce_types(df)
+                    return df
+                except Exception as e2:
+                    logger.error("Excel parse failed (openpyxl fallback)", path=path, error=str(e2))
+                    return None
             logger.error("Excel parse failed", path=path, error=str(e))
             return None
+
+    def _coerce_types(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Attempt to convert string columns to numeric where possible."""
+        for col in df.columns:
+            try:
+                converted = pd.to_numeric(df[col], errors="coerce")
+                if converted.notna().sum() > len(df) * 0.5:
+                    df[col] = converted
+            except (ValueError, TypeError):
+                pass
+        return df
 
     def _parse_docx(self, path: str) -> str:
         try:

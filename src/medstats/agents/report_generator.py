@@ -65,12 +65,16 @@ class ReportGeneratorAgent(BaseAgent):
         for result in test_results:
             if "variable_name" not in result or "descriptive" not in result:
                 continue
+            if result.get("descriptive") is None:
+                continue
 
             table_number += 1
             var_name = result["variable_name"]
             descriptive = result["descriptive"]
             freq_table = result.get("frequency_table")
             test_data = result.get("test_result")
+            if test_data is not None and not isinstance(test_data, dict):
+                test_data = None
 
             # Section heading
             sections.append({
@@ -126,8 +130,9 @@ class ReportGeneratorAgent(BaseAgent):
         # Methodology note
         tests_used = set()
         for r in test_results:
-            if r.get("test_result") and r["test_result"].get("test_type"):
-                tests_used.add(r["test_result"]["test_type"])
+            td = r.get("test_result")
+            if td and isinstance(td, dict) and td.get("test_type"):
+                tests_used.add(td["test_type"])
 
         methodology = self._generate_methodology_note(tests_used, sample_size)
         sections.append({"type": "heading", "content": "Statistical Analysis"})
@@ -149,7 +154,7 @@ class ReportGeneratorAgent(BaseAgent):
         return [action], state
 
     async def _generate_narrative(
-        self, var_name: str, descriptive: dict, freq_table: dict, test_data: dict, sample_size: int
+        self, var_name: str, descriptive: dict, freq_table: dict, test_data, sample_size: int
     ) -> str:
         """Generate narrative paragraph for a variable using LLM."""
         if not self.services:
@@ -177,17 +182,19 @@ Write ONLY the narrative paragraph. Use the exact numbers provided. Do not add a
             return self._generate_narrative_template(var_name, descriptive, freq_table, sample_size)
 
     def _generate_narrative_template(
-        self, var_name: str, descriptive: dict, freq_table: dict, sample_size: int
+        self, var_name: str, descriptive: dict, freq_table, sample_size: int
     ) -> str:
         """Fallback template-based narrative."""
+        if not descriptive:
+            return f"The distribution of {var_name.lower()} is presented in the table below."
         if descriptive.get("mean") is not None:
             return (
                 f"The {var_name.lower()} ranged from {descriptive.get('min_val')} to "
                 f"{descriptive.get('max_val')} with a mean of {descriptive['mean']} "
-                f"and standard deviation of {descriptive['std']}."
+                f"and standard deviation of {descriptive.get('std', 'N/A')}."
             )
-        elif freq_table and freq_table.get("rows"):
-            rows = [r for r in freq_table["rows"] if r["category"] != "TOTAL"]
+        elif freq_table and isinstance(freq_table, dict) and freq_table.get("rows"):
+            rows = [r for r in freq_table["rows"] if r.get("category") != "TOTAL"]
             if rows:
                 top = rows[0]
                 return (
@@ -257,13 +264,14 @@ Write ONLY the narrative paragraph. Use the exact numbers provided. Do not add a
         """Generate executive summary of findings."""
         significant = [
             r for r in test_results
-            if r.get("test_result") and r["test_result"].get("is_significant_05")
+            if r.get("test_result") and isinstance(r["test_result"], dict) and r["test_result"].get("is_significant_05")
         ]
 
         summary_parts = [f"Study: {title}", f"Sample size: {sample_size}"]
         if significant:
             summary_parts.append(f"Significant findings: {len(significant)}")
             for s in significant[:5]:
-                summary_parts.append(f"- {s['variable_name']}: {s['test_result']['significance_statement']}")
+                stmt = s["test_result"].get("significance_statement", "significant")
+                summary_parts.append(f"- {s['variable_name']}: {stmt}")
 
         return "\n".join(summary_parts)

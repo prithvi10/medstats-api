@@ -82,6 +82,15 @@ class TestSelectorAgent(BaseAgent):
             series = df[var_name]
             dtype = var_info["dtype"]
 
+            # Skip columns that can't be processed
+            if dtype == "numerical":
+                try:
+                    series = pd.to_numeric(series, errors="coerce")
+                    if series.dropna().empty:
+                        continue
+                except (ValueError, TypeError):
+                    continue
+
             # Descriptive stats + frequency table for all variables
             descriptive = self.engine.compute_descriptive(series, var_name)
             freq_table = self.engine.compute_frequency_table(series, var_name)
