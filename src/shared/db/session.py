@@ -4,18 +4,27 @@ from src.shared.config.settings import get_settings
 
 settings = get_settings()
 
-engine = create_async_engine(
-    settings.DATABASE_URL,
-    echo=settings.DEBUG,
-    pool_size=10,
-    max_overflow=20,
-)
+_db_url = settings.DATABASE_URL
 
-AsyncSessionLocal = async_sessionmaker(
+# SQLite fallback for local dev without PostgreSQL
+if "sqlite" in _db_url:
+    engine = create_async_engine(_db_url, echo=settings.DEBUG)
+else:
+    engine = create_async_engine(
+        _db_url,
+        echo=settings.DEBUG,
+        pool_size=10,
+        max_overflow=20,
+    )
+
+async_session_factory = async_sessionmaker(
     engine,
     class_=AsyncSession,
     expire_on_commit=False,
 )
+
+# Keep backward compat alias
+AsyncSessionLocal = async_session_factory
 
 
 class Base(DeclarativeBase):
@@ -23,8 +32,14 @@ class Base(DeclarativeBase):
 
 
 async def get_db() -> AsyncSession:
-    async with AsyncSessionLocal() as session:
+    async with async_session_factory() as session:
         try:
             yield session
         finally:
             await session.close()
+
+
+async def init_db():
+    """Create all tables (for SQLite local dev). In production use Alembic."""
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)

@@ -1,12 +1,27 @@
 import uuid
 from datetime import datetime, timezone
 from sqlalchemy import (
-    Column, String, Text, DateTime, Enum, ForeignKey, Integer, JSON, Boolean
+    Column, String, Text, DateTime, Enum, ForeignKey, Integer, JSON, Boolean, TypeDecorator
 )
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from src.shared.db.session import Base
 import enum
+
+
+class GUID(TypeDecorator):
+    """Platform-independent GUID type. Uses String(36) for SQLite, native UUID for PG."""
+    impl = String(36)
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is not None:
+            return str(value)
+        return value
+
+    def process_result_value(self, value, dialect):
+        if value is not None:
+            return uuid.UUID(value) if not isinstance(value, uuid.UUID) else value
+        return value
 
 
 class UserRole(str, enum.Enum):
@@ -44,7 +59,7 @@ class ReviewDecision(str, enum.Enum):
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     email = Column(String(255), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)
     name = Column(String(255), nullable=False)
@@ -62,9 +77,9 @@ class User(Base):
 class ProfessorStudent(Base):
     __tablename__ = "professor_students"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    professor_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    student_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    professor_id = Column(GUID(), ForeignKey("users.id"), nullable=False)
+    student_id = Column(GUID(), ForeignKey("users.id"), nullable=False)
     academic_year = Column(String(20), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -75,9 +90,9 @@ class ProfessorStudent(Base):
 class Submission(Base):
     __tablename__ = "submissions"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    student_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    professor_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    student_id = Column(GUID(), ForeignKey("users.id"), nullable=False)
+    professor_id = Column(GUID(), ForeignKey("users.id"), nullable=True)
     title = Column(String(500), nullable=False)
     intent_description = Column(Text, nullable=True)
     status = Column(Enum(SubmissionStatus), default=SubmissionStatus.SUBMITTED)
@@ -95,8 +110,8 @@ class Submission(Base):
 class SubmissionFile(Base):
     __tablename__ = "submission_files"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    submission_id = Column(UUID(as_uuid=True), ForeignKey("submissions.id"), nullable=False)
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    submission_id = Column(GUID(), ForeignKey("submissions.id"), nullable=False)
     file_url = Column(String(1000), nullable=False)
     file_type = Column(String(50), nullable=False)  # data_excel, data_csv, intent_doc, supporting_doc
     original_name = Column(String(500), nullable=False)
@@ -110,8 +125,8 @@ class SubmissionFile(Base):
 class AnalysisJob(Base):
     __tablename__ = "analysis_jobs"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    submission_id = Column(UUID(as_uuid=True), ForeignKey("submissions.id"), nullable=False)
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    submission_id = Column(GUID(), ForeignKey("submissions.id"), nullable=False)
     status = Column(Enum(JobStatus), default=JobStatus.QUEUED)
     agent_state = Column(JSON, nullable=True)
     test_results = Column(JSON, nullable=True)
@@ -130,9 +145,9 @@ class AnalysisJob(Base):
 class Report(Base):
     __tablename__ = "reports"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    submission_id = Column(UUID(as_uuid=True), ForeignKey("submissions.id"), nullable=False)
-    analysis_job_id = Column(UUID(as_uuid=True), ForeignKey("analysis_jobs.id"), nullable=True)
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    submission_id = Column(GUID(), ForeignKey("submissions.id"), nullable=False)
+    analysis_job_id = Column(GUID(), ForeignKey("analysis_jobs.id"), nullable=True)
     version = Column(Integer, default=1)
     sections = Column(JSON, nullable=True)  # Ordered list of report sections
     charts = Column(JSON, nullable=True)  # Chart metadata + URLs
@@ -150,9 +165,9 @@ class Report(Base):
 class ProfessorReview(Base):
     __tablename__ = "professor_reviews"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    report_id = Column(UUID(as_uuid=True), ForeignKey("reports.id"), nullable=False)
-    professor_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    report_id = Column(GUID(), ForeignKey("reports.id"), nullable=False)
+    professor_id = Column(GUID(), ForeignKey("users.id"), nullable=False)
     decision = Column(Enum(ReviewDecision), nullable=False)
     feedback = Column(Text, nullable=True)
     section_comments = Column(JSON, nullable=True)  # {section_index: comment}
@@ -166,12 +181,12 @@ class ProfessorReview(Base):
 class AgentCorrection(Base):
     __tablename__ = "agent_corrections"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    submission_id = Column(UUID(as_uuid=True), ForeignKey("submissions.id"), nullable=False)
-    review_id = Column(UUID(as_uuid=True), ForeignKey("professor_reviews.id"), nullable=False)
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    submission_id = Column(GUID(), ForeignKey("submissions.id"), nullable=False)
+    review_id = Column(GUID(), ForeignKey("professor_reviews.id"), nullable=False)
     correction_prompt = Column(Text, nullable=False)
     changes_made = Column(JSON, nullable=True)
-    new_report_id = Column(UUID(as_uuid=True), ForeignKey("reports.id"), nullable=True)
+    new_report_id = Column(GUID(), ForeignKey("reports.id"), nullable=True)
     corrected_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     review = relationship("ProfessorReview", back_populates="corrections")

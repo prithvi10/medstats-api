@@ -17,6 +17,13 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI):
     setup_logging(level="DEBUG" if settings.DEBUG else "INFO")
     logger.info("MedStats API starting", env=settings.ENV)
+
+    # Auto-create tables for SQLite (local dev)
+    if "sqlite" in settings.DATABASE_URL:
+        from src.shared.db.session import init_db
+        await init_db()
+        logger.info("SQLite database initialized")
+
     yield
     logger.info("MedStats API shutting down")
 
@@ -45,4 +52,4 @@ app.include_router(admin_router, prefix="/api/admin", tags=["Admin"])
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "service": "medstats-api"}
+    return {"status": "ok", "service": "medstats-api", "env": settings.ENV}

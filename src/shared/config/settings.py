@@ -6,9 +6,10 @@ class Settings(BaseSettings):
     ENV: str = "development"
     DEBUG: bool = True
 
-    DATABASE_URL: str = "postgresql+asyncpg://medstats:medstats@localhost:5433/medstats"
-    DATABASE_URL_SYNC: str = "postgresql://medstats:medstats@localhost:5433/medstats"
-    REDIS_URL: str = "redis://localhost:6380/0"
+    # Default to SQLite for zero-config local dev. Override with PostgreSQL for production.
+    DATABASE_URL: str = "sqlite+aiosqlite:///./medstats_dev.db"
+    DATABASE_URL_SYNC: str = "sqlite:///./medstats_dev.db"
+    REDIS_URL: str = "redis://localhost:6379/0"
 
     JWT_SECRET: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
@@ -26,8 +27,11 @@ class Settings(BaseSettings):
 
     SENTRY_DSN: str = ""
 
-    CELERY_BROKER_URL: str = "redis://localhost:6380/0"
-    CELERY_RESULT_BACKEND: str = "redis://localhost:6380/0"
+    CELERY_BROKER_URL: str = "redis://localhost:6379/0"
+    CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
+
+    # File upload directory (local storage for dev)
+    UPLOAD_DIR: str = "./uploads"
 
     class Config:
         env_file = ".env"

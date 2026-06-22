@@ -37,3 +37,5 @@ build/
 htmlcov/
 .coverage
 .pytest_cache/
+medstats_dev.db
+uploads/
