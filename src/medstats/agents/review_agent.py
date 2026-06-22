@@ -424,6 +424,9 @@ class ReviewAgent(BaseAgent):
         """Rule-based statistical methodology checks."""
         items = []
 
+        # 2.0 Data sufficiency checks (must come first)
+        items.extend(self._check_data_sufficiency(data, df))
+
         # 2.1 Test-data type appropriateness (basic type match)
         items.extend(self._check_test_appropriateness(data))
 
@@ -441,6 +444,98 @@ class ReviewAgent(BaseAgent):
 
         # 2.6 Chi-square expected cell counts
         items.extend(self._check_chi_square_assumptions(data, df))
+
+        return items
+
+    def _check_data_sufficiency(self, data: dict, df: Optional[pd.DataFrame]) -> List[ReviewItem]:
+        """Check if the masterchart data is sufficient for reliable statistical analysis."""
+        items = []
+        sample_size = data.get("sample_size", 0)
+        variables = data.get("variables", [])
+        test_results = data.get("test_results", [])
+
+        # Check 1: Overall sample size adequacy
+        if sample_size < 10:
+            items.append(ReviewItem(
+                check_id="sample_critically_small",
+                tier=2,
+                severity=Severity.ERROR,
+                category="Data Sufficiency",
+                message=f"Sample size N={sample_size} is critically small for any statistical inference",
+                suggestion="Minimum recommended sample size is 30 for parametric tests, 20 for non-parametric. Collect more data.",
+            ))
+        elif sample_size < 20:
+            items.append(ReviewItem(
+                check_id="sample_very_small",
+                tier=2,
+                severity=Severity.WARNING,
+                category="Data Sufficiency",
+                message=f"Sample size N={sample_size} limits statistical power significantly",
+                suggestion="Consider collecting more data (N≥30 recommended). Use non-parametric tests and note limited power as a limitation.",
+            ))
+
+        # Check 2: Variables-to-observations ratio (overfitting risk)
+        n_vars = len([v for v in variables if v.get("dtype") == "numerical"])
+        if n_vars > 0 and sample_size > 0:
+            ratio = sample_size / n_vars
+            if ratio < 5:
+                items.append(ReviewItem(
+                    check_id="sample_var_ratio_critical",
+                    tier=2,
+                    severity=Severity.ERROR,
+                    category="Data Sufficiency",
+                    message=f"Only {ratio:.1f} observations per variable (N={sample_size}, {n_vars} numerical vars). Risk of spurious results.",
+                    suggestion=f"Need at least {n_vars * 10} observations for {n_vars} variables (rule: 10 per variable minimum)",
+                ))
+            elif ratio < 10:
+                items.append(ReviewItem(
+                    check_id="sample_var_ratio_low",
+                    tier=2,
+                    severity=Severity.WARNING,
+                    category="Data Sufficiency",
+                    message=f"{ratio:.1f} observations per variable (recommended ≥10). Statistical power may be insufficient.",
+                    suggestion="Consider reducing variables or collecting more data",
+                ))
+
+        # Check 3: High missing data in individual variables
+        for var_info in variables:
+            missing = var_info.get("missing_count", 0)
+            if sample_size > 0 and missing > 0:
+                missing_pct = (missing / sample_size) * 100
+                var_name = var_info["name"]
+                if missing_pct > 50:
+                    items.append(ReviewItem(
+                        check_id="sample_high_missing",
+                        tier=2,
+                        severity=Severity.ERROR,
+                        category="Data Sufficiency",
+                        message=f"'{var_name}': {missing_pct:.0f}% missing data ({missing}/{sample_size}). Results unreliable.",
+                        variable=var_name,
+                        suggestion="Exclude this variable from analysis or collect complete data. Any test on this variable is underpowered.",
+                    ))
+                elif missing_pct > 20:
+                    items.append(ReviewItem(
+                        check_id="sample_moderate_missing",
+                        tier=2,
+                        severity=Severity.WARNING,
+                        category="Data Sufficiency",
+                        message=f"'{var_name}': {missing_pct:.0f}% missing data ({missing}/{sample_size}). May bias results.",
+                        variable=var_name,
+                        suggestion="Document missingness pattern. Consider if missing-at-random assumption holds.",
+                    ))
+
+        # Check 4: Effective sample size vs reported (accounting for missing data)
+        if df is not None:
+            actual_complete = len(df.dropna(how="all"))
+            if actual_complete < sample_size * 0.7:
+                items.append(ReviewItem(
+                    check_id="sample_effective_low",
+                    tier=2,
+                    severity=Severity.WARNING,
+                    category="Data Sufficiency",
+                    message=f"Effective sample (complete rows) is {actual_complete} vs reported N={sample_size}. {sample_size - actual_complete} rows have substantial missing data.",
+                    suggestion="Report effective sample size for each analysis. Consider listwise vs pairwise deletion impact.",
+                ))
 
         return items
 
