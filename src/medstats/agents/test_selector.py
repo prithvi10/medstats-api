@@ -65,7 +65,8 @@ class TestSelectorAgent(BaseAgent):
         if not df_json:
             return [AgentAction.failure_action("test_select", "No dataframe available")], state
 
-        df = pd.read_json(df_json)
+        from io import StringIO
+        df = pd.read_json(StringIO(df_json))
         variables = context.parsed_data["variables"]
         study_design = context.parsed_data["study_design"]
         groups_info = context.parsed_data.get("groups")
