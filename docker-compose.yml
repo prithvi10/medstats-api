@@ -1,37 +1,6 @@
-version: "3.8"
-
 services:
-  api:
-    build: .
-    ports:
-      - "8000:8000"
-    environment:
-      - DATABASE_URL=postgresql+asyncpg://medstats:medstats@db:5432/medstats
-      - REDIS_URL=redis://redis:6379/0
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - JWT_SECRET=${JWT_SECRET}
-      - ENV=development
-    depends_on:
-      - db
-      - redis
-    volumes:
-      - ./src:/app/src
-    command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
-
-  worker:
-    build: .
-    environment:
-      - DATABASE_URL=postgresql+asyncpg://medstats:medstats@db:5432/medstats
-      - REDIS_URL=redis://redis:6379/0
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - ENV=development
-    depends_on:
-      - db
-      - redis
-    command: celery -A src.medstats.services.worker worker --loglevel=info --concurrency=2
-
   db:
-    image: postgres:16
+    image: postgres:16-alpine
     environment:
       POSTGRES_USER: medstats
       POSTGRES_PASSWORD: medstats
@@ -40,11 +9,97 @@ services:
       - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U medstats"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7-alpine
     ports:
       - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://medstats:medstats@db:5432/medstats
+      - DATABASE_URL_SYNC=postgresql://medstats:medstats@db:5432/medstats
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - JWT_SECRET=docker-dev-secret-key
+      - ENV=development
+      - DEBUG=true
+      - UPLOAD_DIR=/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src
+      - ./uploads:/app/uploads
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  worker:
+    build: .
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://medstats:medstats@db:5432/medstats
+      - DATABASE_URL_SYNC=postgresql://medstats:medstats@db:5432/medstats
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ENV=development
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src
+    command: celery -A src.medstats.services.worker worker --loglevel=info --concurrency=2
+
+  test:
+    build: .
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://medstats:medstats@db:5432/medstats_test
+      - DATABASE_URL_SYNC=postgresql://medstats:medstats@db:5432/medstats_test
+      - REDIS_URL=redis://redis:6379/1
+      - JWT_SECRET=test-secret-key
+      - ENV=test
+      - DEBUG=true
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src
+      - ./tests:/app/tests
+      - ./scripts:/app/scripts
+    command: >
+      bash -c "
+        PGPASSWORD=medstats psql -h db -U medstats -c 'CREATE DATABASE medstats_test;' 2>/dev/null || true
+        python -m pytest tests/ -v --tb=short
+      "
+    profiles:
+      - test
 
 volumes:
   pgdata:
