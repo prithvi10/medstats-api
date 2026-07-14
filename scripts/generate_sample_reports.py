@@ -19,6 +19,7 @@ from src.medstats.agents.report_generator import ReportGeneratorAgent
 from src.medstats.agents.review_agent import ReviewAgent
 from src.medstats.services.export_service import export_report_to_docx
 from src.agentic_core.agents.base_agent import MissionState
+from src.agentic_core.llm.service import get_llm_service
 
 DATA_ROOT = Path("/Users/prithviraj/Thesis Project/data")
 OUTPUT_DIR = Path(__file__).parent.parent / "generated_reports" / "comparisons"
@@ -99,7 +100,14 @@ async def run_pipeline(dataset: dict) -> dict:
     name = dataset["name"]
     excel_path = dataset["input_excel"]
 
+    # Get LLM service (None if no API key configured)
+    llm_service = get_llm_service()
+
     print_section(f"{ds_id}: {name}")
+    if llm_service:
+        print(f"  LLM: GPT-5 enabled")
+    else:
+        print(f"  LLM: Disabled (no API key) — using templates")
 
     if not excel_path.exists():
         print(f"  ⚠️ SKIPPED - Input file not found: {excel_path}")
@@ -148,13 +156,12 @@ async def run_pipeline(dataset: dict) -> dict:
     tests_count = state.agent_outputs.get("tests_run_count", 0)
     print(f"       ✓ Ran {tests_count} statistical tests")
 
-    # Phase 3: Report Generator
+    # Phase 3: Report Generator (uses LLM for narrative)
     print(f"  [3/4] Generating report...")
-    reporter = ReportGeneratorAgent(services=None)
+    reporter = ReportGeneratorAgent(services=llm_service)
     state = await reporter.run(state)
     if state.status == "FAILED":
         print(f"  ❌ ReportGenerator FAILED: {state.error_message}")
-        # Still try to export what we have
         print(f"       Attempting partial export with available data...")
 
     sections = state.agent_outputs.get("report_sections", [])
@@ -162,9 +169,9 @@ async def run_pipeline(dataset: dict) -> dict:
     print(f"       {'✓' if state.status != 'FAILED' else '~'} "
           f"{len(sections)} sections, {len(charts)} charts")
 
-    # Phase 4: AI Review
+    # Phase 4: AI Review (uses LLM for Tier 3 interpretation)
     print(f"  [4/4] Running AI Professor Review...")
-    reviewer = ReviewAgent(services=None)
+    reviewer = ReviewAgent(services=llm_service)
     state = await reviewer.run(state)
     review = state.agent_outputs.get("review_summary", {})
     if review:

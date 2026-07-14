@@ -1,0 +1,13 @@
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.git
+.env
+medstats_dev.db
+uploads/*
+!uploads/.gitkeep
+generated_reports
+generated_charts/*
+!generated_charts/.gitkeep
+node_modules

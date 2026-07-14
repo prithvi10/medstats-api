@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.shared.config.settings import get_settings
 from src.shared.db.session import Base
 from src.medstats.db.models import *  # noqa: F401, F403 - imports all models for autogenerate
+from src.medstats.db.rag_models import *  # noqa: F401, F403
 
 settings = get_settings()
 config = context.config

@@ -145,12 +145,15 @@ class TestFullPipelineIntegration:
     """End-to-end pipeline test with real data."""
 
     @pytest.mark.asyncio
-    async def test_complete_pipeline_medicine5(self, medicine5_excel_path, medicine5_discussion_path):
+    async def test_complete_pipeline_medicine5(self, medicine5_excel_path, medicine5_discussion_path, tmp_path, monkeypatch):
         from src.medstats.agents.document_parser import DocumentParserAgent
         from src.medstats.agents.test_selector import TestSelectorAgent
         from src.medstats.agents.report_generator import ReportGeneratorAgent
         from src.agentic_core.agents.base_agent import MissionState
         from src.agentic_core.agents.orchestrator import MissionControl
+        import src.medstats.core.chart_generator as cg
+
+        monkeypatch.setattr(cg, "CHART_DIR", str(tmp_path))
 
         state = MissionState(submission_id="test-e2e", job_id="job-e2e")
         state.agent_outputs["files"] = [

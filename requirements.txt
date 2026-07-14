@@ -15,6 +15,19 @@ python-multipart>=0.0.9
 
 # LLM & AI
 openai>=1.40.0
+cohere>=5.5.0
+sentence-transformers>=3.0.0
+
+# RAG / Vector store
+pgvector>=0.3.0
+
+# PDF processing (hierarchical chunking)
+pdfminer.six>=20221105
+pymupdf>=1.24.0
+
+# Knowledge graph / literature
+networkx>=3.0
+biopython>=1.84
 
 # Statistical Analysis
 scipy>=1.14.0

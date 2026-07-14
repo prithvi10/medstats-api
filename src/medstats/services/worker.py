@@ -43,9 +43,10 @@ async def _run_pipeline_async(job_id: str):
     from src.medstats.agents.document_parser import DocumentParserAgent
     from src.medstats.agents.test_selector import TestSelectorAgent
     from src.medstats.agents.report_generator import ReportGeneratorAgent
+    from src.medstats.agents.literature_match import LiteratureMatchAgent
     from src.agentic_core.agents.base_agent import MissionState
     from src.agentic_core.agents.orchestrator import MissionControl
-    from src.agentic_core.llm.service import LLMService
+    from src.agentic_core.llm.service import get_llm_service
     from datetime import datetime, timezone
 
     settings = get_settings()
@@ -66,7 +67,7 @@ async def _run_pipeline_async(job_id: str):
         submission = db.query(Submission).filter(Submission.id == job.submission_id).first()
         files = db.query(SubmissionFile).filter(SubmissionFile.submission_id == submission.id).all()
 
-        llm = LLMService()
+        llm = get_llm_service()
 
         state = MissionState(
             submission_id=str(submission.id),
@@ -83,6 +84,7 @@ async def _run_pipeline_async(job_id: str):
             DocumentParserAgent(services=llm),
             TestSelectorAgent(services=llm),
             ReportGeneratorAgent(services=llm),
+            LiteratureMatchAgent(services=llm),
         ]
 
         async def progress_cb(s: MissionState):
@@ -128,3 +130,19 @@ async def _run_pipeline_async(job_id: str):
         db.commit()
     finally:
         db.close()
+
+
+@celery_app.task(bind=True, name="medstats.run_revision_pipeline")
+def run_revision_pipeline(self, job_id: str, revision_payload: dict):
+    """Apply structured professor review and regenerate report."""
+    import asyncio
+    from src.medstats.api.analysis import _run_revision_inline
+    asyncio.run(_run_revision_inline(job_id, revision_payload))
+
+
+@celery_app.task(bind=True, name="medstats.run_correction_pipeline")
+def run_correction_pipeline(self, job_id: str, correction_data: dict):
+    """Legacy free-text correction pipeline."""
+    import asyncio
+    from src.medstats.api.analysis import _run_correction_inline
+    asyncio.run(_run_correction_inline(job_id, correction_data))

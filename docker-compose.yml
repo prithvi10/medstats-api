@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: medstats
       POSTGRES_PASSWORD: medstats
@@ -40,6 +40,7 @@ services:
       - ENV=development
       - DEBUG=true
       - UPLOAD_DIR=/app/uploads
+      - CORS_ORIGINS=http://localhost:3000,http://localhost:5173
     depends_on:
       db:
         condition: service_healthy
@@ -47,14 +48,16 @@ services:
         condition: service_healthy
     volumes:
       - ./src:/app/src
+      - ./scripts:/app/scripts
       - ./uploads:/app/uploads
+      - ./generated_charts:/app/generated_charts
     command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 30s
 
   worker:
     build: .
@@ -66,14 +69,34 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ENV=development
+      - UPLOAD_DIR=/app/uploads
     depends_on:
-      db:
-        condition: service_healthy
-      redis:
+      api:
         condition: service_healthy
     volumes:
       - ./src:/app/src
+      - ./uploads:/app/uploads
+      - ./generated_charts:/app/generated_charts
     command: celery -A src.medstats.services.worker worker --loglevel=info --concurrency=2
+
+  ui:
+    build:
+      context: ../medstats-ui
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_PROXY_TARGET=http://api:8000
+    volumes:
+      - ../medstats-ui/src:/app/src
+      - ../medstats-ui/index.html:/app/index.html
+      - ../medstats-ui/vite.config.ts:/app/vite.config.ts
+      - ../medstats-ui/tailwind.config.js:/app/tailwind.config.js
+      - ../medstats-ui/postcss.config.js:/app/postcss.config.js
+      - ui_node_modules:/app/node_modules
+    depends_on:
+      api:
+        condition: service_healthy
 
   test:
     build: .
@@ -103,3 +126,4 @@ services:
 
 volumes:
   pgdata:
+  ui_node_modules:

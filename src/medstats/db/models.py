@@ -35,7 +35,10 @@ class SubmissionStatus(str, enum.Enum):
     PARSING = "parsing"
     ANALYZING = "analyzing"
     REPORT_READY = "report_ready"
+    AI_REVIEWED = "ai_reviewed"
     UNDER_REVIEW = "under_review"
+    REVIEW_IN_PROGRESS = "review_in_progress"
+    REVIEW_COMPLETED = "review_completed"
     REVISION = "revision"
     APPROVED = "approved"
     EXPORTED = "exported"
@@ -72,6 +75,7 @@ class User(Base):
 
     submissions = relationship("Submission", back_populates="student", foreign_keys="Submission.student_id")
     reviews = relationship("ProfessorReview", back_populates="professor")
+    notifications = relationship("Notification", back_populates="user", foreign_keys="Notification.user_id")
 
 
 class ProfessorStudent(Base):
@@ -190,3 +194,19 @@ class AgentCorrection(Base):
     corrected_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     review = relationship("ProfessorReview", back_populates="corrections")
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
+    type = Column(String(50), nullable=False)
+    title = Column(String(255), nullable=False)
+    message = Column(Text, nullable=True)
+    submission_id = Column(GUID(), ForeignKey("submissions.id"), nullable=True)
+    is_read = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    user = relationship("User", back_populates="notifications", foreign_keys=[user_id])
+    submission = relationship("Submission")

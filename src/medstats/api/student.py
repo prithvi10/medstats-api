@@ -6,11 +6,16 @@ from typing import Optional, List
 from uuid import UUID
 from src.shared.db.session import get_db
 from src.shared.security.auth import get_current_user
+from src.shared.config.settings import get_settings
 from src.medstats.db.models import (
-    User, Submission, SubmissionFile, SubmissionStatus, Report, UserRole
+    User, Submission, SubmissionFile, SubmissionStatus, Report, UserRole,
+    ProfessorStudent, ProfessorReview,
 )
+from src.medstats.services.review_context import build_review_history
+from src.medstats.services.notification_service import notify_review_requested
 
 router = APIRouter()
+settings = get_settings()
 
 
 class SubmissionResponse(BaseModel):
@@ -36,6 +41,41 @@ def _require_student(current_user: dict):
     if current_user.get("role") != UserRole.STUDENT.value:
         raise HTTPException(status_code=403, detail="Student access required")
     return current_user
+
+
+class ProfessorOption(BaseModel):
+    id: str
+    name: str
+    email: str
+    department: Optional[str] = None
+    institution: Optional[str] = None
+
+
+@router.get("/professors")
+async def list_professors(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    _require_student(current_user)
+    result = await db.execute(
+        select(User)
+        .where(User.role == UserRole.PROFESSOR)
+        .where(User.is_active == True)  # noqa: E712
+        .order_by(User.name.asc())
+    )
+    professors = result.scalars().all()
+    return {
+        "professors": [
+            ProfessorOption(
+                id=str(p.id),
+                name=p.name,
+                email=p.email,
+                department=p.department,
+                institution=p.institution,
+            ).dict()
+            for p in professors
+        ]
+    }
 
 
 @router.get("/submissions", response_model=SubmissionListResponse)
@@ -94,9 +134,9 @@ async def create_submission(
         content = await uploaded_file.read()
 
         # For MVP, store locally. Later: upload to S3/R2
-        file_path = f"uploads/{submission.id}/{uploaded_file.filename}"
+        file_path = f"{settings.UPLOAD_DIR}/{submission.id}/{uploaded_file.filename}"
         import os
-        os.makedirs(f"uploads/{submission.id}", exist_ok=True)
+        os.makedirs(f"{settings.UPLOAD_DIR}/{submission.id}", exist_ok=True)
         with open(file_path, "wb") as f:
             f.write(content)
 
@@ -175,9 +215,10 @@ async def get_submission_report(
     report_result = await db.execute(
         select(Report)
         .where(Report.submission_id == submission_id)
-        .order_by(Report.version.desc())
+        .order_by(Report.version.desc(), Report.generated_at.desc())
+        .limit(1)
     )
-    report = report_result.scalar_one_or_none()
+    report = report_result.scalars().first()
     if not report:
         raise HTTPException(status_code=404, detail="No report generated yet")
 
@@ -191,6 +232,108 @@ async def get_submission_report(
         "pdf_url": report.pdf_url,
         "docx_url": report.docx_url,
         "generated_at": report.generated_at.isoformat(),
+    }
+
+
+@router.post("/submissions/{submission_id}/submit-review")
+async def submit_for_professor_review(
+    submission_id: UUID,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Student submits a completed report for professor review."""
+    _require_student(current_user)
+    result = await db.execute(
+        select(Submission).where(
+            Submission.id == submission_id,
+            Submission.student_id == current_user["sub"],
+        )
+    )
+    submission = result.scalar_one_or_none()
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    if submission.status not in (
+        SubmissionStatus.REPORT_READY,
+        SubmissionStatus.AI_REVIEWED,
+        SubmissionStatus.REVISION,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot submit for review from status '{submission.status.value}'",
+        )
+
+    report_result = await db.execute(
+        select(Report).where(Report.submission_id == submission_id).limit(1)
+    )
+    if not report_result.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="No report available to submit")
+
+    if not submission.professor_id:
+        link_result = await db.execute(
+            select(ProfessorStudent)
+            .where(ProfessorStudent.student_id == current_user["sub"])
+            .limit(1)
+        )
+        link = link_result.scalar_one_or_none()
+        if link:
+            submission.professor_id = link.professor_id
+
+    submission.status = SubmissionStatus.UNDER_REVIEW
+
+    if submission.professor_id:
+        student_result = await db.execute(select(User).where(User.id == current_user["sub"]))
+        student = student_result.scalar_one_or_none()
+        professor_result = await db.execute(select(User).where(User.id == submission.professor_id))
+        professor = professor_result.scalar_one_or_none()
+        if student and professor:
+            await notify_review_requested(
+                db=db,
+                professor_id=str(submission.professor_id),
+                student_name=student.name,
+                submission_id=str(submission.id),
+                submission_title=submission.title,
+                professor_name=professor.name,
+            )
+
+    await db.commit()
+
+    return {
+        "message": "Submitted for professor review",
+        "status": submission.status.value,
+        "professor_id": str(submission.professor_id) if submission.professor_id else None,
+    }
+
+
+@router.get("/submissions/{submission_id}/professor-review")
+async def get_professor_review(
+    submission_id: UUID,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Latest professor review feedback for the student."""
+    _require_student(current_user)
+    result = await db.execute(
+        select(Submission).where(
+            Submission.id == submission_id,
+            Submission.student_id == current_user["sub"],
+        )
+    )
+    submission = result.scalar_one_or_none()
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    history = await build_review_history(db, submission_id)
+    if not history:
+        raise HTTPException(status_code=404, detail="No professor review yet")
+
+    latest = history[-1]
+    return {
+        "submission_id": str(submission_id),
+        "status": submission.status.value,
+        "review_round": len(history),
+        "latest_review": latest,
+        "review_history": history,
     }
 
 

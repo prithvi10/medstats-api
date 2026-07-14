@@ -23,13 +23,18 @@ case "$TEST_SCOPE" in
     integration)
         python -m pytest tests/integration/ -v -s --cov=src --cov-report=term-missing
         ;;
+    scenarios)
+        python scripts/generate_scenario_fixtures.py
+        python -m pytest tests/scenarios/ -v -s
+        ;;
     all)
+        python scripts/generate_scenario_fixtures.py
         python -m pytest tests/ -v --cov=src --cov-report=term-missing --cov-report=html
         echo ""
         echo "HTML coverage report: htmlcov/index.html"
         ;;
     *)
-        echo "Usage: $0 [unit|integration|all]"
+        echo "Usage: $0 [unit|integration|scenarios|all]"
         exit 1
         ;;
 esac

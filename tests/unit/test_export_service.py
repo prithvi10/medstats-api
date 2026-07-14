@@ -1,9 +1,62 @@
 """Unit tests for the DOCX and PDF export service."""
+import json
 import pytest
 import os
 from pathlib import Path
 
+from src.medstats.services.export_service import (
+    build_export_document_title,
+    build_export_filename,
+    generate_preview_html,
+)
+
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
+
+
+class TestExportTitles:
+    def test_document_title_suffix(self):
+        assert build_export_document_title("TENS Study") == "TENS Study - Statistical analysis"
+        assert build_export_document_title("TENS Study - Statistical analysis") == "TENS Study - Statistical analysis"
+
+    def test_filename(self):
+        assert build_export_filename("TENS Study", "docx") == "TENS Study - Statistical analysis.docx"
+
+
+class TestPreviewHtmlOrder:
+    def test_executive_summary_before_observations(self, sample_report_data):
+        html = generate_preview_html(
+            report_sections=sample_report_data["report_sections"],
+            charts=sample_report_data["charts"],
+            title=sample_report_data["title"],
+            methodology_note=sample_report_data["methodology_note"],
+            summary=sample_report_data["summary"],
+        )
+        exec_idx = html.index("Executive Summary")
+        obs_idx = html.index("OBSERVATIONS AND RESULTS")
+        method_idx = html.index("Statistical Methodology")
+        assert exec_idx < obs_idx < method_idx
+        assert "TENS Study - Statistical analysis" in html or sample_report_data["title"] in html
+
+    def test_structured_executive_summary_formatting(self, sample_report_data):
+        structured = json.dumps({
+            "study_description": "A study of 50 patients with long bone fractures.",
+            "methodology": "Chi-square and Z-tests were applied.",
+            "key_findings": [
+                {"variable": "Sex", "result": "Male predominance (p<0.001)", "significant": True},
+                {"variable": "Age", "result": "No significant difference (p=0.23)", "significant": False},
+            ],
+            "stats": {"total_variables": 2, "significant": 1, "not_significant": 1},
+        })
+        html = generate_preview_html(
+            report_sections=sample_report_data["report_sections"],
+            charts=[],
+            title=sample_report_data["title"],
+            summary=structured,
+        )
+        assert "Study Description" in html
+        assert "Key Findings" in html
+        assert "finding-item sig" in html
+        assert "variables analyzed" in html
 
 
 @pytest.fixture
@@ -35,7 +88,7 @@ def sample_report_data():
 
 
 class TestDocxExport:
-    def test_generates_docx_file(self, sample_report_data):
+    def test_generates_docx_file(self, sample_report_data, tmp_path):
         from src.medstats.services.export_service import export_report_to_docx
 
         filepath = export_report_to_docx(
@@ -45,33 +98,30 @@ class TestDocxExport:
             methodology_note=sample_report_data["methodology_note"],
             summary=sample_report_data["summary"],
             submission_id="test-export-001",
+            output_dir=str(tmp_path),
         )
 
         assert os.path.exists(filepath)
         assert filepath.endswith(".docx")
         assert os.path.getsize(filepath) > 1000
 
-        # Verify content
         from docx import Document
         doc = Document(filepath)
 
-        # Check headings exist
         headings = [p.text for p in doc.paragraphs if p.style.name.startswith("Heading")]
+        assert "Executive Summary" in headings
         assert "OBSERVATIONS AND RESULTS" in headings
+        assert "Statistical Methodology" in headings
+        assert headings.index("Executive Summary") < headings.index("OBSERVATIONS AND RESULTS")
 
-        # Check tables exist
         assert len(doc.tables) >= 2
 
-        # Verify table content
         table1 = doc.tables[0]
         headers = [cell.text for cell in table1.rows[0].cells]
         assert "Category" in headers
         assert "Number" in headers
 
-        # Cleanup
-        os.remove(filepath)
-
-    def test_with_real_pipeline_output(self):
+    def test_with_real_pipeline_output(self, tmp_path):
         """Run the pipeline on real data and export."""
         import asyncio
         from src.medstats.agents.document_parser import DocumentParserAgent
@@ -114,15 +164,16 @@ class TestDocxExport:
             methodology_note=final_state.agent_outputs.get("methodology_note", ""),
             summary=final_state.agent_outputs.get("summary", ""),
             submission_id="medicine5-full",
+            output_dir=str(tmp_path),
         )
 
         assert os.path.exists(filepath)
         size = os.path.getsize(filepath)
-        assert size > 5000  # Should be substantial with charts
+        assert size > 5000
 
         from docx import Document
         doc = Document(filepath)
-        assert len(doc.tables) >= 5  # Multiple frequency tables
+        assert len(doc.tables) >= 5
         assert len(doc.paragraphs) > 20
 
         print(f"\n  Exported DOCX: {filepath} ({size / 1024:.1f} KB)")
@@ -130,7 +181,7 @@ class TestDocxExport:
 
 
 class TestPdfExport:
-    def test_generates_pdf_file(self, sample_report_data):
+    def test_generates_pdf_file(self, sample_report_data, tmp_path):
         from src.medstats.services.export_service import export_report_to_pdf
 
         filepath = export_report_to_pdf(
@@ -140,11 +191,9 @@ class TestPdfExport:
             methodology_note=sample_report_data["methodology_note"],
             summary=sample_report_data["summary"],
             submission_id="test-pdf-001",
+            output_dir=str(tmp_path),
         )
 
         assert os.path.exists(filepath)
         assert filepath.endswith(".pdf")
         assert os.path.getsize(filepath) > 1000
-
-        # Cleanup
-        os.remove(filepath)
