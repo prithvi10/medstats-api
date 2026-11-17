@@ -11,3 +11,5 @@ generated_reports
 generated_charts/*
 !generated_charts/.gitkeep
 node_modules
+data/
+alembic/versions/__pycache__

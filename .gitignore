@@ -12,6 +12,7 @@ venv/
 .env
 .env.local
 .env.prod
+.env.beta
 
 # IDE
 .vscode/
@@ -28,6 +29,8 @@ uploads/
 generated_charts/
 logs/
 tmp/
+data/
+tests/msmf_regression_output/
 
 # Distribution
 dist/

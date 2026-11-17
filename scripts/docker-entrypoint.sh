@@ -12,9 +12,12 @@ from src.shared.db.session import init_db
 asyncio.run(init_db())
 "
 
-if [ "${ENV:-development}" != "production" ]; then
+if [ "${SEED_DEMO_USERS:-false}" = "true" ] || [ "${ENV:-development}" != "production" ]; then
   echo "Seeding demo users (if needed)..."
   python scripts/seed_demo_users.py || true
 fi
+
+echo "Seeding admin user (if needed)..."
+python scripts/seed_admin.py || true
 
 exec "$@"

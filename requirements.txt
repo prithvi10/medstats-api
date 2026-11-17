@@ -38,6 +38,7 @@ numpy>=1.26.0
 
 # Document Parsing
 openpyxl>=3.1.0
+xlrd>=2.0.1
 python-docx>=1.1.0
 PyPDF2>=3.0.0
 
